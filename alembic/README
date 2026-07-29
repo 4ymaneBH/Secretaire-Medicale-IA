@@ -1,0 +1,14 @@
+Alembic Migrations for PillQare AI Assistant Backend
+
+Usage
+1) Configure your database URL in `.env` and ensure `app/core/config.py` exposes a sync URL for Alembic if needed.
+
+2) Create a revision from current models (in `app/models/session.py`):
+	alembic revision --autogenerate -m "Initial schema"
+
+3) Apply migrations:
+	alembic upgrade head
+
+Notes
+- Use the `alembic/versions/` folder for migration files.
+- Remove or ignore any alternate migrations folder under `app/db/migrations/` to avoid confusion.
