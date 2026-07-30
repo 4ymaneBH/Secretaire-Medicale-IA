@@ -1,6 +1,1 @@
-"""Voice integration services."""
-from app.services.voice.call_orchestrator import VoiceCallOrchestrator
-
-__all__ = [
-    "VoiceCallOrchestrator",
-]
+"""Voice pipeline services: the OpenAI Realtime <-> Twilio Media Stream bridge."""

@@ -19,11 +19,7 @@ class StreamingTTSError(Exception):
 
 
 def _get_voice_settings_for_intent(intent_type: Optional[str]) -> tuple[Dict[str, Any], float]:
-    """Return (voice_settings, speed) tuned for the given intent.
-
-    Mirrors the prosody logic in TTSService.synthesize_speech() so that
-    streamed audio sounds identical to the non-streaming path.
-    """
+    """Return (voice_settings, speed) tuned for the given intent."""
     if intent_type in ("empathy", "apology", "concern", "technical_issue", "patient_care"):
         return {
             "stability": 0.20,           # More organic micro-variations (breathing, warmth)
