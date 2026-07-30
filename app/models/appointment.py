@@ -1,5 +1,6 @@
+
 """Appointment model: booking slot proposed/confirmed via the AI secretary."""
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Enum, Text, Index
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Enum, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -35,10 +36,6 @@ class Appointment(Base):
 
     patient = relationship("Patient", back_populates="appointments")
     call_sessions = relationship("CallSession", back_populates="appointment")
-
-    __table_args__ = (
-        Index("ix_appointments_scheduled_at", "scheduled_at"),
-    )
 
     def __repr__(self):
         return f"<Appointment(id={self.id}, scheduled_at={self.scheduled_at}, status={self.status})>"

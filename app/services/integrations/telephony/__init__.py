@@ -1,8 +1,7 @@
 """Telephony integrations."""
-from app.services.integrations.telephony.provider import TelephonyProvider
-from app.services.integrations.telephony.callbacks import handle_call_status_callback
+from app.services.integrations.telephony.provider import TelephonyProvider, get_telephony_provider
 
 __all__ = [
     "TelephonyProvider",
-    "handle_call_status_callback",
+    "get_telephony_provider",
 ]

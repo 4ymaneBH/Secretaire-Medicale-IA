@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     twilio_auth_token: str = Field(..., description="Twilio Auth Token")
     twilio_phone_number: str = Field(..., description="Twilio Phone Number")
     twilio_webhook_base_url: str = Field(..., description="Base URL for webhooks")
+    human_transfer_number: str = Field(..., description="Phone number to dial when a call is transferred to a human")
 
     # =========================================================================
     # OPENAI CONFIGURATION
@@ -86,6 +87,11 @@ class Settings(BaseSettings):
     # RATE LIMITING
     # =========================================================================
     rate_limit_per_minute: int = Field(default=20, ge=1, le=1000)
+
+    # =========================================================================
+    # INTERNAL SERVICE AUTH
+    # =========================================================================
+    internal_api_key: str = Field(..., description="Shared secret required to trigger outbound calls (scheduler/Module 1)")
 
     # =========================================================================
     # LOGGING

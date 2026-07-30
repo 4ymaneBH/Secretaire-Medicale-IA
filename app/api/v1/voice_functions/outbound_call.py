@@ -23,6 +23,7 @@ async def handle_outbound_call(
     request: Request,
     call_sid: str = Form(...),
     job_id: Optional[str] = Query(None),
+    purpose: str = Query("reminder"),
 ) -> PlainTextResponse:
     """Handle outbound call connect: create the CallSession and start the Realtime bridge."""
     try:
@@ -65,6 +66,7 @@ async def handle_outbound_call(
         connect = Connect()
         stream = Stream(url=ws_url)
         stream.parameter(name="language", value=language)
+        stream.parameter(name="purpose", value=purpose)
         if appointment_id:
             stream.parameter(name="appointment_id", value=str(appointment_id))
         connect.append(stream)

@@ -69,6 +69,15 @@ async def verify_twilio_signature(
 		raise HTTPException(status_code=401, detail="Invalid Twilio signature")
 
 
+async def verify_internal_api_key(
+	x_internal_api_key: str | None = Header(default=None),
+) -> None:
+	"""Require the shared internal-service secret (scheduler/Module 1) on endpoints
+	that place real outbound calls, since they are not otherwise authenticated."""
+	if not x_internal_api_key or not hmac.compare_digest(x_internal_api_key, settings.internal_api_key):
+		raise HTTPException(status_code=401, detail="Invalid or missing internal API key")
+
+
 async def rate_limit(
 	request: Request,
 	key_prefix: str = "rl:default",

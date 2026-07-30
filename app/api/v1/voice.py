@@ -1,8 +1,9 @@
 """Voice endpoints for telephony provider webhooks (inbound, outbound, status)."""
-from fastapi import APIRouter, Request, WebSocket, Form, Query
+from fastapi import APIRouter, Request, WebSocket, Form, Query, Depends
 from fastapi.responses import PlainTextResponse
 
 from app.core.logging_config import get_logger
+from app.api.deps import verify_internal_api_key, rate_limit
 
 from typing import Optional
 
@@ -21,11 +22,30 @@ async def voice_inbound_endpoint(request: Request):
 async def voice_outbound_endpoint(
     request: Request,
     call_sid: str = Form(..., alias="CallSid"),
-    job_id: Optional[str] = Query(None)
+    job_id: Optional[str] = Query(None),
+    purpose: str = Query("reminder"),
 ):
     """Delegate to handle_outbound_call implementation in voice_functions."""
     from app.api.v1.voice_functions.outbound_call import handle_outbound_call
-    return await handle_outbound_call(request=request, call_sid=call_sid, job_id=job_id)
+    return await handle_outbound_call(request=request, call_sid=call_sid, job_id=job_id, purpose=purpose)
+
+
+@router.post(
+    "/voice/outbound/trigger/{appointment_id}",
+    dependencies=[Depends(verify_internal_api_key), Depends(rate_limit)],
+)
+async def trigger_outbound_call_endpoint(appointment_id: int, purpose: str = Query("reminder")):
+    """Place an outbound call for an appointment (confirmation, reminder, satisfaction survey,
+    exam reminder, or administrative follow-up).
+
+    Intended to be called by a scheduler or by Module 1 (central backend) — not by patients.
+    """
+    from app.services.voice.outbound_dispatcher import initiate_call_for_appointment
+
+    call_sid = await initiate_call_for_appointment(appointment_id, purpose)
+    if not call_sid:
+        return {"success": False, "error": "Failed to initiate call"}
+    return {"success": True, "call_sid": call_sid}
 
 
 @router.post("/voice/status")
