@@ -1,4 +1,4 @@
-"""Initial schema: patients, call sessions, transcripts, outcomes, appointments, knowledge base
+"""Initial schema: patients, call sessions, transcripts, outcomes, appointments, patient memories
 
 Revision ID: 0001
 Revises:
@@ -129,18 +129,17 @@ def upgrade() -> None:
     op.create_index("ix_outcomes_type_created", "outcomes", ["outcome_type", "created_at"])
 
     op.create_table(
-        "knowledge_chunks",
+        "patient_memories",
         sa.Column("id", sa.Integer(), primary_key=True, index=True),
-        sa.Column("title", sa.String(255), nullable=False),
-        sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("language", sa.String(5), nullable=False, index=True),
+        sa.Column("patient_id", sa.Integer(), sa.ForeignKey("patients.id"), nullable=False, index=True),
+        sa.Column("summary", sa.Text(), nullable=False),
         sa.Column("embedding", Vector(1536), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
 
 def downgrade() -> None:
-    op.drop_table("knowledge_chunks")
+    op.drop_table("patient_memories")
     op.drop_index("ix_outcomes_type_created", table_name="outcomes")
     op.drop_table("outcomes")
     op.drop_index("ix_transcripts_call_timestamp", table_name="transcripts")

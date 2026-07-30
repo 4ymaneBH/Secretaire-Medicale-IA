@@ -3,7 +3,7 @@ from app.models.call_session import CallSession, Patient, CallStatus, CallDirect
 from app.models.transcript import Transcript
 from app.models.outcome import Outcome, OutcomeType, TransferReason
 from app.models.appointment import Appointment, AppointmentStatus
-from app.models.knowledge_chunk import KnowledgeChunk
+from app.models.conversation_memory import PatientMemory
 
 __all__ = [
     "CallSession",
@@ -16,5 +16,5 @@ __all__ = [
     "TransferReason",
     "Appointment",
     "AppointmentStatus",
-    "KnowledgeChunk",
+    "PatientMemory",
 ]

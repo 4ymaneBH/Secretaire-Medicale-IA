@@ -9,7 +9,7 @@ from app.db.base import Base
 
 # Import all models to ensure they're registered with Base
 from app.models import (
-    CallSession, Patient, Transcript, Outcome, Appointment, KnowledgeChunk
+    CallSession, Patient, Transcript, Outcome, Appointment, PatientMemory
 )
 
 # this is the Alembic Config object, which provides

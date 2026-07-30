@@ -309,13 +309,34 @@ class RealtimeSession:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def update_language(self, language: str) -> None:
+        """Switch the conversation language mid-call ("changement de langue à la volée").
+
+        Re-sends session.update with instructions for the new language. The
+        caller is responsible for also updating the TTS voice for the new
+        language (the Realtime session only affects what the model says, not
+        which ElevenLabs voice speaks it).
+        """
+        self._language = language
+        if self._ws is None:
+            logger.warning(f"{_LOG_PREFIX} update_language called before connect()")
+            return
+        await self._send_session_update()
+        logger.info(f"{_LOG_PREFIX} Session language switched to {language!r}")
+
     async def _send_session_update(self) -> None:
         """Send the session.update configuration event to the Realtime API."""
+        _LANGUAGE_NAMES = {
+            "fr": "French (fr-FR)",
+            "en": "English (en-US)",
+            "ar": "Arabic",
+            "it": "Italian",
+            "es": "Spanish",
+        }
         instructions = self._system_prompt
-        if self._language == "fr":
-            instructions += "\n\nLanguage: French (fr-FR). Respond only in French."
-        elif self._language == "en":
-            instructions += "\n\nLanguage: English (en-US). Respond only in English."
+        language_name = _LANGUAGE_NAMES.get(self._language)
+        if language_name:
+            instructions += f"\n\nLanguage: {language_name}. Respond only in this language."
 
         session_update = {
             "type": "session.update",

@@ -51,6 +51,14 @@ MAX_CALL_DURATION_SECONDS = 420  # 7 minutes
 router = APIRouter()
 
 
+def _twilio_client():
+    from twilio.rest import Client as TwilioClient
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
+
+
 async def _force_hangup_twilio(call_sid: str) -> bool:
     """Terminate a Twilio PSTN call via REST API.
 
@@ -58,11 +66,7 @@ async def _force_hangup_twilio(call_sid: str) -> bool:
     the call alive and continues billing until the call is explicitly
     marked completed via the REST API.
     """
-    from twilio.rest import Client as TwilioClient
-    from app.core.config import get_settings
-
-    settings = get_settings()
-    client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
+    client = _twilio_client()
 
     for attempt in range(1, 4):
         try:
@@ -76,6 +80,29 @@ async def _force_hangup_twilio(call_sid: str) -> bool:
 
     logger.error(f"{_LOG_PREFIX} All hangup attempts failed for {call_sid!r}")
     return False
+
+
+async def _transfer_call_to_human(call_sid: str) -> bool:
+    """Redirect an in-progress Twilio call to a human secretary/practitioner.
+
+    Ends the Media Stream (the current TwiML <Connect>) and replaces it with
+    a <Dial> to the configured human transfer number.
+    """
+    from twilio.twiml.voice_response import VoiceResponse
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    twiml = VoiceResponse()
+    twiml.dial(settings.human_transfer_number)
+
+    client = _twilio_client()
+    try:
+        client.calls(call_sid).update(twiml=str(twiml))
+        logger.info(f"{_LOG_PREFIX} Call {call_sid!r} transferred to human ({settings.human_transfer_number})")
+        return True
+    except Exception as exc:
+        logger.error(f"{_LOG_PREFIX} Failed to transfer call {call_sid!r} to human: {exc}")
+        return False
 
 
 async def _persist_call_outcome(session: CallSessionState) -> None:
@@ -111,8 +138,34 @@ async def _persist_call_outcome(session: CallSessionState) -> None:
             db.add(outcome)
             await db.commit()
             logger.info(f"{_LOG_PREFIX} Outcome persisted for {session.call_sid!r}")
+
+        if session.patient_id and session.summary:
+            from app.services.ai.memory_service import get_memory_service
+            await get_memory_service().store_memory(session.patient_id, session.summary)
+
     except Exception as exc:
         logger.error(f"{_LOG_PREFIX} Failed to persist call outcome: {exc}", exc_info=True)
+
+
+async def _get_patient_id_for_call(call_sid: str) -> int | None:
+    """Look up the patient linked to this call (set at CallSession creation)."""
+    from sqlalchemy import select
+    from app.db.session import get_session_context
+    from app.models.call_session import CallSession
+
+    async with get_session_context() as db:
+        result = await db.execute(
+            select(CallSession).where(CallSession.call_sid == call_sid)
+        )
+        call_session = result.scalar_one_or_none()
+        return call_session.patient_id if call_session else None
+
+
+async def _get_memory_context(patient_id: int, language: str) -> str | None:
+    """Fetch a short summary of this patient's previous calls, if any."""
+    from app.services.ai.memory_service import get_memory_service
+
+    return await get_memory_service().get_recent_context(patient_id)
 
 
 @router.websocket("/ws/media-stream")
@@ -126,6 +179,7 @@ async def media_stream_handler(websocket: WebSocket) -> None:
     call_sid: str = ""
     language: str = "fr"
     appointment_id: str | None = None
+    purpose: str | None = None
 
     try:
         async for raw in websocket.iter_text():
@@ -143,6 +197,7 @@ async def media_stream_handler(websocket: WebSocket) -> None:
                 custom = start_payload.get("customParameters") or {}
                 language = custom.get("language", "fr")
                 appointment_id = custom.get("appointment_id")
+                purpose = custom.get("purpose")
 
                 logger.info(
                     f"{_LOG_PREFIX} Start event - call_sid={call_sid!r} "
@@ -165,9 +220,13 @@ async def media_stream_handler(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    session = CallSessionState(call_sid=call_sid, language=language)
+    patient_id = await _get_patient_id_for_call(call_sid)
+    session = CallSessionState(call_sid=call_sid, language=language, patient_id=patient_id)
 
-    system_prompt = build_system_prompt(language, appointment_id=appointment_id)
+    memory_context = await _get_memory_context(patient_id, language) if patient_id else None
+    system_prompt = build_system_prompt(
+        language, appointment_id=appointment_id, purpose=purpose, memory_context=memory_context
+    )
     tools = get_tools(language)
 
     realtime = RealtimeSession(
@@ -196,24 +255,43 @@ async def media_stream_handler(websocket: WebSocket) -> None:
         logger.info(f"{_LOG_PREFIX} Tool call received: name={name!r}")
 
         result_json = await execute_tool(tool_call_id, name, args_json, session)
+        result = json.loads(result_json)
+        status = result.get("status")
 
-        is_terminal = name == "end_call"
-        await realtime.send_tool_result(tool_call_id, result_json, trigger_response=not is_terminal)
+        # end_call and transfer_to_human both end the audio bridge — the model
+        # should not keep talking after either, so we suppress response.create.
+        # language_switched also suppresses it here: the session must be
+        # reconfigured for the new language *before* the next response is
+        # generated, otherwise the reply comes back in the old language.
+        trigger_response = status not in ("hangup", "transfer", "language_switched")
+        await realtime.send_tool_result(tool_call_id, result_json, trigger_response=trigger_response)
 
-        if is_terminal:
+        if status == "language_switched":
+            new_language = result.get("language", session.language)
+            await realtime.update_language(new_language)
+            bridge.set_language(new_language)
+            await realtime.trigger_initial_response()
+            return
+
+        if status == "hangup":
+            logger.info(f"{_LOG_PREFIX} Hangup sentinel received - waiting for TTS to finish")
+            await bridge.wait_until_drained(timeout=15.0)
+            await asyncio.sleep(1.0)
+            await _force_hangup_twilio(call_sid)
             try:
-                result = json.loads(result_json)
-                if result.get("status") == "hangup":
-                    logger.info(f"{_LOG_PREFIX} Hangup sentinel received - waiting for TTS to finish")
-                    await bridge.wait_until_drained(timeout=15.0)
-                    await asyncio.sleep(1.0)
-                    await _force_hangup_twilio(call_sid)
-                    try:
-                        await websocket.close()
-                    except Exception:
-                        pass
-            except Exception as exc:
-                logger.warning(f"{_LOG_PREFIX} Could not inspect tool result for hangup: {exc}")
+                await websocket.close()
+            except Exception:
+                pass
+
+        elif status == "transfer":
+            logger.info(f"{_LOG_PREFIX} Transfer sentinel received - waiting for TTS to finish")
+            await bridge.wait_until_drained(timeout=15.0)
+            await asyncio.sleep(1.0)
+            await _transfer_call_to_human(call_sid)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     realtime.on_tool_call = on_tool_call
 

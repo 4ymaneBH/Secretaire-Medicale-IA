@@ -2,12 +2,14 @@
 
 When the OpenAI Realtime API fires a function-call event, the media-stream
 handler calls :func:`execute_tool`. This module dispatches the call, mutates
-the in-memory :class:`CallSessionState` for the current call, and returns a
-JSON string forwarded back to OpenAI as the tool output.
+the in-memory :class:`CallSessionState` for the current call, persists
+appointment confirmations, and returns a JSON string forwarded back to
+OpenAI as the tool output.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from app.core.logging_config import get_logger
@@ -15,6 +17,9 @@ from app.core.logging_config import get_logger
 logger = get_logger(__name__)
 
 _LOG_PREFIX = "[RealtimeTools]"
+
+SUPPORTED_LANGUAGES = {"fr", "en", "ar", "it", "es"}
+BUSINESS_HOURS = range(9, 17)  # 09:00-17:00
 
 
 @dataclass
@@ -24,8 +29,10 @@ class CallSessionState:
     call_sid: str
     phone_number: Optional[str] = None
     language: str = "fr"
+    patient_id: Optional[int] = None
     proposed_slot: Optional[str] = None
     appointment_confirmed: bool = False
+    appointment_id: Optional[int] = None
     transfer_requested: bool = False
     transfer_reason: Optional[str] = None
     urgency_detected: bool = False
@@ -42,8 +49,8 @@ async def execute_tool(
     """Dispatch a function-call event from the OpenAI Realtime API.
 
     Returns a JSON string to forward to OpenAI as the function-call output.
-    The ``"status": "hangup"`` sentinel signals the media-stream handler to
-    trigger a Twilio hangup.
+    The ``"status"`` sentinel signals the media-stream handler what to do next:
+    ``"hangup"`` ends the call, ``"transfer"`` redirects it to a human.
     """
     try:
         try:
@@ -54,12 +61,18 @@ async def execute_tool(
 
         logger.info(f"{_LOG_PREFIX} Executing tool={name!r} call_id={call_id!r}")
 
+        if name == "get_available_slots":
+            return await _handle_get_available_slots(args)
         if name == "propose_appointment_slot":
             return await _handle_propose_slot(args, session)
         if name == "confirm_appointment":
             return await _handle_confirm_appointment(args, session)
         if name == "transfer_to_human":
             return await _handle_transfer_to_human(args, session)
+        if name == "switch_language":
+            return await _handle_switch_language(args, session)
+        if name == "recall_context":
+            return await _handle_recall_context(args, session)
         if name == "end_call":
             return await _handle_end_call(args, session)
 
@@ -71,15 +84,54 @@ async def execute_tool(
         return json.dumps({"status": "error", "message": str(exc)})
 
 
+async def _handle_get_available_slots(args: dict[str, Any]) -> str:
+    """Return real available appointment slots (business hours, excluding already-booked ones).
+
+    Args schema:
+        days_ahead (int) — optional, how many days ahead to search (default 7)
+    """
+    from sqlalchemy import select
+    from app.db.session import get_session_context
+    from app.models.appointment import Appointment, AppointmentStatus
+
+    days_ahead = int(args.get("days_ahead", 7))
+    now = datetime.utcnow()
+
+    candidate_slots = []
+    for day_offset in range(1, days_ahead + 1):
+        day = now + timedelta(days=day_offset)
+        if day.weekday() >= 5:  # skip weekends
+            continue
+        for hour in BUSINESS_HOURS:
+            candidate_slots.append(day.replace(hour=hour, minute=0, second=0, microsecond=0))
+
+    async with get_session_context() as db:
+        result = await db.execute(
+            select(Appointment.scheduled_at).where(
+                Appointment.status != AppointmentStatus.CANCELED,
+                Appointment.scheduled_at >= now,
+            )
+        )
+        booked = {row[0].replace(tzinfo=None) for row in result.all()}
+
+    available = [s for s in candidate_slots if s not in booked][:5]
+    return json.dumps({"status": "ok", "slots": [s.isoformat() for s in available]})
+
+
 async def _handle_propose_slot(args: dict[str, Any], session: CallSessionState) -> str:
     """Propose an appointment slot to the patient.
 
     Args schema:
-        slot (str) — required, ISO datetime of the proposed slot
+        slot (str) — required, ISO 8601 datetime of the proposed slot
     """
     slot = args.get("slot")
     if not slot:
         return json.dumps({"status": "error", "message": "slot is required"})
+
+    try:
+        datetime.fromisoformat(slot)
+    except ValueError:
+        return json.dumps({"status": "error", "message": "slot must be an ISO 8601 datetime"})
 
     session.proposed_slot = slot
     logger.info(f"{_LOG_PREFIX} Proposed slot {slot!r}")
@@ -87,7 +139,7 @@ async def _handle_propose_slot(args: dict[str, Any], session: CallSessionState) 
 
 
 async def _handle_confirm_appointment(args: dict[str, Any], session: CallSessionState) -> str:
-    """Confirm the previously proposed appointment slot.
+    """Confirm the previously proposed appointment slot and persist it.
 
     Args schema:
         reason (str) — optional, patient's stated reason for the visit
@@ -95,17 +147,33 @@ async def _handle_confirm_appointment(args: dict[str, Any], session: CallSession
     if not session.proposed_slot:
         return json.dumps({"status": "error", "message": "No slot has been proposed yet"})
 
-    session.appointment_confirmed = True
+    from app.db.session import get_session_context
+    from app.models.appointment import Appointment, AppointmentStatus
+
     reason = args.get("reason")
+
+    async with get_session_context() as db:
+        appointment = Appointment(
+            patient_id=session.patient_id,
+            scheduled_at=datetime.fromisoformat(session.proposed_slot),
+            reason=reason,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        db.add(appointment)
+        await db.commit()
+        await db.refresh(appointment)
+
+    session.appointment_confirmed = True
+    session.appointment_id = appointment.id
     if reason:
         session.summary = reason
 
-    logger.info(f"{_LOG_PREFIX} Appointment confirmed for slot {session.proposed_slot!r}")
-    return json.dumps({"status": "ok", "message": "Appointment confirmed"})
+    logger.info(f"{_LOG_PREFIX} Appointment {appointment.id} confirmed for slot {session.proposed_slot!r}")
+    return json.dumps({"status": "ok", "message": "Appointment confirmed", "appointment_id": appointment.id})
 
 
 async def _handle_transfer_to_human(args: dict[str, Any], session: CallSessionState) -> str:
-    """Flag this call for transfer to a human secretary/practitioner.
+    """Transfer this call to a human secretary/practitioner.
 
     Args schema:
         reason  (str) — required
@@ -120,7 +188,40 @@ async def _handle_transfer_to_human(args: dict[str, Any], session: CallSessionSt
         session.urgency_detected = True
 
     logger.warning(f"{_LOG_PREFIX} transfer_to_human triggered (urgent={urgent}, reason={reason!r})")
-    return json.dumps({"status": "ok", "message": "Transfer flagged"})
+    return json.dumps({"status": "transfer", "message": "Transferring to a human", "urgent": urgent})
+
+
+async def _handle_switch_language(args: dict[str, Any], session: CallSessionState) -> str:
+    """Switch the conversation language mid-call.
+
+    Args schema:
+        language (str) — required, one of fr/en/ar/it/es
+    """
+    language = args.get("language", "").lower()
+    if language not in SUPPORTED_LANGUAGES:
+        return json.dumps({"status": "error", "message": f"Unsupported language: {language}"})
+
+    session.language = language
+    logger.info(f"{_LOG_PREFIX} Language switched to {language!r}")
+    return json.dumps({"status": "language_switched", "language": language})
+
+
+async def _handle_recall_context(args: dict[str, Any], session: CallSessionState) -> str:
+    """Recall relevant context from this patient's previous calls.
+
+    Args schema:
+        query (str) — required, what the patient just referenced (e.g. "my last visit")
+    """
+    query = args.get("query")
+    if not query:
+        return json.dumps({"status": "error", "message": "query is required"})
+    if not session.patient_id:
+        return json.dumps({"status": "ok", "context": None})
+
+    from app.services.ai.memory_service import get_memory_service
+
+    context = await get_memory_service().recall_context(session.patient_id, query)
+    return json.dumps({"status": "ok", "context": context})
 
 
 async def _handle_end_call(args: dict[str, Any], session: CallSessionState) -> str:

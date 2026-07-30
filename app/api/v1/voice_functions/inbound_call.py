@@ -39,8 +39,20 @@ async def handle_inbound_call(
         from sqlalchemy import select
         from app.db.session import get_session_context
         from app.models.call_session import CallSession, CallDirection, CallStatus
+        from app.models.call_session import Patient
 
         async with get_session_context() as db:
+            patient_result = await db.execute(
+                select(Patient).where(Patient.phone_number == from_number)
+            )
+            patient = patient_result.scalar_one_or_none()
+            if not patient:
+                patient = Patient(phone_number=from_number, language_preference=settings.default_language)
+                db.add(patient)
+                await db.flush()
+
+            language = patient.language_preference or settings.default_language
+
             result = await db.execute(
                 select(CallSession).where(CallSession.call_sid == call_sid)
             )
@@ -52,7 +64,8 @@ async def handle_inbound_call(
                     phone_number=from_number,
                     direction=CallDirection.INBOUND,
                     status=CallStatus.INITIATED,
-                    language=settings.default_language,
+                    language=language,
+                    patient_id=patient.id,
                     started_at=datetime.utcnow(),
                 )
                 db.add(call_session)
@@ -60,6 +73,7 @@ async def handle_inbound_call(
                 await db.refresh(call_session)
                 logger.info(f"Call session created: id={call_session.id}, CallSid={call_sid}")
             else:
+                await db.commit()
                 logger.info(f"Call session already exists: id={call_session.id}")
 
         base_url = settings.twilio_webhook_base_url.rstrip("/")
@@ -69,7 +83,7 @@ async def handle_inbound_call(
         response = VoiceResponse()
         connect = Connect()
         stream = Stream(url=ws_url)
-        stream.parameter(name="language", value=settings.default_language)
+        stream.parameter(name="language", value=language)
         connect.append(stream)
         response.append(connect)
 

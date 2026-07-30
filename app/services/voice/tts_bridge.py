@@ -29,9 +29,8 @@ logger = get_logger(__name__)
 # Sentence-boundary thresholds
 # ---------------------------------------------------------------------------
 # A hard sentence boundary exists when a strong punctuation mark (. ! ?)
-# is immediately followed by whitespace (space or newline).  This mirrors
-# the spirit of sentence_streamer._is_boundary() while being adapted to
-# the streaming-delta context where we receive text one character at a time.
+# is immediately followed by whitespace (space or newline). Adapted for the
+# streaming-delta context where text arrives one character at a time.
 _HARD_PUNCT = frozenset(".!?")
 _SOFT_PUNCT = frozenset(",;")
 
@@ -141,6 +140,10 @@ class TTSBridge:
     # ------------------------------------------------------------------
     # Public API — called by the media stream handler
     # ------------------------------------------------------------------
+
+    def set_language(self, language: str) -> None:
+        """Switch the TTS voice language mid-call ("changement de langue à la volée")."""
+        self._language = language
 
     async def on_text_delta(self, delta: str) -> None:
         """Receive a text delta from OpenAI and enqueue completed sentences.

@@ -83,6 +83,7 @@ class Patient(Base):
 
     call_sessions = relationship("CallSession", back_populates="patient")
     appointments = relationship("Appointment", back_populates="patient")
+    memories = relationship("PatientMemory", back_populates="patient")
 
     def __repr__(self):
         return f"<Patient(id={self.id}, phone={self.phone_number})>"
