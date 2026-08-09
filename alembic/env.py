@@ -1,8 +1,8 @@
 from logging.config import fileConfig
 import os
 from pathlib import Path
-from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy.engine import make_url
 
 from alembic import context
 from app.db.base import Base
@@ -21,14 +21,32 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Explicitly load .env file before importing settings
+# Explicitly load the project-level .env file. Alembic only needs the database
+# connection string; importing the application's Settings object here would make
+# migrations depend on unrelated Twilio, OpenAI, ElevenLabs, and Redis secrets.
 from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-# Load database URL from environment (.env or explicit)
-from app.core.config import settings
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+
+def get_database_url() -> str:
+    """Return a synchronous database URL suitable for Alembic."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is not configured. Copy .env.example to .env and "
+            "set DATABASE_URL before running Alembic."
+        )
+
+    url = make_url(database_url)
+    if url.drivername == "postgresql+asyncpg":
+        url = url.set(drivername="postgresql")
+    return url.render_as_string(hide_password=False)
+
+
+# ConfigParser treats percent signs as interpolation markers, so escape them
+# when passing a URL through Alembic's configuration object.
+config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -72,7 +90,7 @@ def run_migrations_online() -> None:
 
     """
     from sqlalchemy import create_engine
-    
+
     connectable = create_engine(
         config.get_main_option("sqlalchemy.url"),
         poolclass=pool.NullPool,
