@@ -2,6 +2,7 @@
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.logging_config import get_logger
@@ -30,7 +31,9 @@ async def initiate_call_for_appointment(appointment_id: int, purpose: str = "rem
 
     async with get_session_context() as db:
         result = await db.execute(
-            select(Appointment).where(Appointment.id == appointment_id)
+            select(Appointment)
+            .options(selectinload(Appointment.patient))
+            .where(Appointment.id == appointment_id)
         )
         appointment = result.scalar_one_or_none()
 

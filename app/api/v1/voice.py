@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request, WebSocket, Form, Query, Depends
 from fastapi.responses import PlainTextResponse
 
 from app.core.logging_config import get_logger
-from app.api.deps import verify_internal_api_key, rate_limit
+from app.api.deps import verify_internal_api_key, verify_twilio_signature, rate_limit
 
 from typing import Optional
 
@@ -11,14 +11,32 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
-@router.post("/voice/inbound", response_class=PlainTextResponse)
+async def rate_limit_twilio_voice(request: Request) -> None:
+    """Apply the dedicated rate limit used by Twilio voice webhooks."""
+    await rate_limit(request, key_prefix="rl:twilio:voice", limit=60, window_seconds=60)
+
+
+async def rate_limit_twilio_status(request: Request) -> None:
+    """Apply the dedicated rate limit used by Twilio status callbacks."""
+    await rate_limit(request, key_prefix="rl:twilio:status", limit=120, window_seconds=60)
+
+
+@router.post(
+    "/voice/inbound",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(verify_twilio_signature), Depends(rate_limit_twilio_voice)],
+)
 async def voice_inbound_endpoint(request: Request):
     """Handle inbound patient calls and start the AI secretary conversation."""
     from app.api.v1.voice_functions.inbound_call import handle_inbound_call
     return await handle_inbound_call(request)
 
 
-@router.post("/voice/outbound", response_class=PlainTextResponse)
+@router.post(
+    "/voice/outbound",
+    response_class=PlainTextResponse,
+    dependencies=[Depends(verify_twilio_signature), Depends(rate_limit_twilio_voice)],
+)
 async def voice_outbound_endpoint(
     request: Request,
     call_sid: str = Form(..., alias="CallSid"),
@@ -48,7 +66,10 @@ async def trigger_outbound_call_endpoint(appointment_id: int, purpose: str = Que
     return {"success": True, "call_sid": call_sid}
 
 
-@router.post("/voice/status")
+@router.post(
+    "/voice/status",
+    dependencies=[Depends(verify_twilio_signature), Depends(rate_limit_twilio_status)],
+)
 async def voice_status_endpoint(request: Request):
     """Delegate to voice_status implementation in voice_functions."""
     from app.api.v1.voice_functions.voice_status import handle_call_status

@@ -31,31 +31,46 @@ async def handle_outbound_call(
         appointment_id = job_id
 
         from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
         from app.db.session import get_session_context
         from app.models.call_session import CallSession, CallDirection, CallStatus
         from app.models.appointment import Appointment
 
         async with get_session_context() as db:
             phone_number = "unknown"
+            patient_id = None
             if appointment_id:
                 result = await db.execute(
-                    select(Appointment).where(Appointment.id == int(appointment_id))
+                    select(Appointment)
+                    .options(selectinload(Appointment.patient))
+                    .where(Appointment.id == int(appointment_id))
                 )
                 appointment = result.scalar_one_or_none()
                 if appointment and appointment.patient:
                     language = appointment.patient.language_preference or language
                     phone_number = appointment.patient.phone_number
+                    patient_id = appointment.patient_id
 
-            call_session = CallSession(
-                call_sid=call_sid,
-                phone_number=phone_number,
-                direction=CallDirection.OUTBOUND,
-                status=CallStatus.INITIATED,
-                language=language,
-                appointment_id=int(appointment_id) if appointment_id else None,
-                started_at=datetime.utcnow(),
+            existing_result = await db.execute(
+                select(CallSession).where(CallSession.call_sid == call_sid)
             )
-            db.add(call_session)
+            call_session = existing_result.scalar_one_or_none()
+
+            if not call_session:
+                call_session = CallSession(
+                    call_sid=call_sid,
+                    phone_number=phone_number,
+                    direction=CallDirection.OUTBOUND,
+                    status=CallStatus.INITIATED,
+                    language=language,
+                    patient_id=patient_id,
+                    appointment_id=int(appointment_id) if appointment_id else None,
+                    started_at=datetime.utcnow(),
+                )
+                db.add(call_session)
+            else:
+                logger.info(f"Call session already exists for outbound call {call_sid}")
+
             await db.commit()
 
         base_url = settings.twilio_webhook_base_url.rstrip("/")

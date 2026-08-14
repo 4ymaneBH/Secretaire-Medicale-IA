@@ -6,29 +6,16 @@ API bridge (/ws/media-stream), which handles the greeting and the full
 conversation.
 """
 from datetime import datetime
-from typing import Any
-
-from fastapi import Request, Depends
+from fastapi import Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
 from app.core.logging_config import get_logger
 from app.core.config import settings
-from app.api.deps import verify_twilio_signature, rate_limit
 
 logger = get_logger(__name__)
 
-
-async def rate_limit_twilio_voice(request: Request) -> None:
-    """Rate limit for Twilio voice webhooks."""
-    await rate_limit(request, key_prefix="rl:twilio", limit=60, window_seconds=60)
-
-
-async def handle_inbound_call(
-    request: Request,
-    _sig: Any = Depends(verify_twilio_signature),
-    _rl: Any = Depends(rate_limit_twilio_voice),
-):
+async def handle_inbound_call(request: Request):
     """Handle an inbound patient call and start the AI secretary conversation."""
     try:
         form = await request.form()

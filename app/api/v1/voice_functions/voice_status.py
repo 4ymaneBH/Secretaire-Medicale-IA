@@ -1,27 +1,14 @@
 """Voice endpoint for telephony provider call-status webhooks."""
 from datetime import datetime
-from typing import Any
-
-from fastapi import Request, Depends
+from fastapi import Request
 
 from app.core.logging_config import get_logger
-from app.api.deps import verify_twilio_signature, rate_limit
 
 logger = get_logger(__name__)
 
 ENDED_STATUSES = {"completed", "busy", "no-answer", "failed", "canceled"}
 
-
-async def rate_limit_twilio_status(request: Request) -> None:
-    """Rate limit for Twilio status webhooks."""
-    await rate_limit(request, key_prefix="rl:twilio", limit=120, window_seconds=60)
-
-
-async def handle_call_status(
-    request: Request,
-    _sig: Any = Depends(verify_twilio_signature),
-    _rl: Any = Depends(rate_limit_twilio_status),
-):
+async def handle_call_status(request: Request):
     """Handle Twilio call status callbacks.
 
     Statuses: initiated, ringing, in-progress, completed, busy, no-answer, failed, canceled
