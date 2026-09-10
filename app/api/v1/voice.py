@@ -21,6 +21,15 @@ async def rate_limit_twilio_status(request: Request) -> None:
     await rate_limit(request, key_prefix="rl:twilio:status", limit=120, window_seconds=60)
 
 
+async def rate_limit_internal_trigger(request: Request) -> None:
+    """Apply the rate limit used by the internal outbound-call trigger.
+
+    Wrapping is required: depending on `rate_limit` directly would expose its
+    `limit`/`window_seconds` arguments as caller-supplied query parameters.
+    """
+    await rate_limit(request, key_prefix="rl:internal:trigger", limit=30, window_seconds=60)
+
+
 @router.post(
     "/voice/inbound",
     response_class=PlainTextResponse,
@@ -50,7 +59,7 @@ async def voice_outbound_endpoint(
 
 @router.post(
     "/voice/outbound/trigger/{appointment_id}",
-    dependencies=[Depends(verify_internal_api_key), Depends(rate_limit)],
+    dependencies=[Depends(verify_internal_api_key), Depends(rate_limit_internal_trigger)],
 )
 async def trigger_outbound_call_endpoint(appointment_id: int, purpose: str = Query("reminder")):
     """Place an outbound call for an appointment (confirmation, reminder, satisfaction survey,
