@@ -29,8 +29,14 @@ async def verify_twilio_signature(
 
 	Requires `TWILIO_AUTH_TOKEN` in environment. Uses full URL & body params.
 	"""
-	# Allow temporary skip in local testing (e.g., when using ngrok/debugging)
+	# Allow temporary skip in local testing (e.g., when using ngrok/debugging).
+	# Never honoured in production: it would leave the webhooks fully unauthenticated.
 	if os.getenv("SKIP_TWILIO_SIGNATURE_VERIFICATION", "false").lower() in {"1", "true", "yes"}:
+		if settings.is_production:
+			raise HTTPException(
+				status_code=500,
+				detail="SKIP_TWILIO_SIGNATURE_VERIFICATION cannot be enabled in production",
+			)
 		return
 
 	# Read Twilio auth token from application settings (.env-backed)
