@@ -1,9 +1,10 @@
 """Voice endpoints for telephony provider webhooks (inbound, outbound, status)."""
-from fastapi import APIRouter, Request, WebSocket, Form, Query, Depends
+from fastapi import APIRouter, Request, WebSocket, Form, Query, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from app.core.logging_config import get_logger
 from app.api.deps import verify_internal_api_key, verify_twilio_signature, rate_limit
+from app.services.voice.outbound_dispatcher import OUTBOUND_PURPOSES
 
 from typing import Optional
 
@@ -60,18 +61,58 @@ async def voice_outbound_endpoint(
 @router.post(
     "/voice/outbound/trigger/{appointment_id}",
     dependencies=[Depends(verify_internal_api_key), Depends(rate_limit_internal_trigger)],
+    summary="Trigger an outbound call for an appointment",
+    responses={
+        200: {
+            "description": "Call created by the telephony provider",
+            "content": {
+                "application/json": {
+                    "example": {"success": True, "call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+                }
+            },
+        },
+        400: {"description": "`purpose` is not one of the five supported call types"},
+        401: {"description": "Missing or invalid X-Internal-API-Key header"},
+        404: {"description": "No appointment exists with this id"},
+        409: {"description": "The appointment has no patient with a phone number, so it cannot be called"},
+        502: {"description": "The telephony provider failed to create the call"},
+    },
 )
-async def trigger_outbound_call_endpoint(appointment_id: int, purpose: str = Query("reminder")):
+async def trigger_outbound_call_endpoint(
+    appointment_id: int,
+    purpose: str = Query(
+        "reminder",
+        description="Which automated call script to run.",
+        json_schema_extra={"enum": sorted(OUTBOUND_PURPOSES)},
+    ),
+):
     """Place an outbound call for an appointment (confirmation, reminder, satisfaction survey,
     exam reminder, or administrative follow-up).
 
     Intended to be called by a scheduler or by Module 1 (central backend) — not by patients.
     """
-    from app.services.voice.outbound_dispatcher import initiate_call_for_appointment
+    from app.services.voice.outbound_dispatcher import (
+        AppointmentNotFoundError,
+        InvalidPurposeError,
+        PatientNotCallableError,
+        TelephonyProviderError,
+        initiate_call_for_appointment,
+    )
 
-    call_sid = await initiate_call_for_appointment(appointment_id, purpose)
-    if not call_sid:
-        return {"success": False, "error": "Failed to initiate call"}
+    try:
+        call_sid = await initiate_call_for_appointment(appointment_id, purpose)
+    except InvalidPurposeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AppointmentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PatientNotCallableError as exc:
+        # 409, not 422: FastAPI already returns 422 for its own request-validation
+        # failures (a non-integer appointment_id), and Module 1 needs to tell the
+        # two apart.
+        raise HTTPException(status_code=409, detail=str(exc))
+    except TelephonyProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
     return {"success": True, "call_sid": call_sid}
 
 
