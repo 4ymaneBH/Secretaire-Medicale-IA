@@ -12,3 +12,8 @@ htmlcov/
 .idea/
 .vscode/
 .dist/
+evals/runs/
+.claude/
+report/
+3lm_solutions_logo.jfif
+morocco_ensam_um5-removebg-preview.png

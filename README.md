@@ -106,7 +106,7 @@ Les appels sortants sont initiés via `POST /api/v1/voice/outbound/trigger/{appo
 
 ```bash
 # 1. Cloner le repo
-git clone https://github.com/oumayma728/Secretaire-Medicale-IA.git
+git clone https://github.com/4ymaneBH/Secretaire-Medicale-IA.git
 cd Secretaire-Medicale-IA
 
 # 2. Configurer l'environnement
@@ -211,3 +211,6 @@ Marqueurs disponibles : `unit`, `integration`, `architecture`, `slow`.
 pytest -m unit          # tests unitaires uniquement
 pytest -m integration   # tests d'intégration (API/DB)
 ```
+
+Les évaluations conversationnelles (20 scénarios synthétiques, vérifications
+déterministes et juge LLM optionnel) sont décrites dans [evals/README.md](evals/README.md).
