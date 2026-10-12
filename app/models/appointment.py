@@ -1,11 +1,11 @@
 
 """Appointment model: booking slot proposed/confirmed via the AI secretary."""
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Enum, Text
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 
-from app.db.base import Base
+from app.db.base import Base, value_enum
 
 
 class AppointmentStatus(str, enum.Enum):
@@ -28,7 +28,7 @@ class Appointment(Base):
     scheduled_at = Column(DateTime(timezone=True), nullable=False, index=True)
     duration_minutes = Column(Integer, default=30)
     reason = Column(String(255), nullable=True)
-    status = Column(Enum(AppointmentStatus), nullable=False, default=AppointmentStatus.PROPOSED)
+    status = Column(value_enum(AppointmentStatus), nullable=False, default=AppointmentStatus.PROPOSED)
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

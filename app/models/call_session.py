@@ -1,10 +1,10 @@
 """Call session model for active call tracking."""
-from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Enum, Index
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 
-from app.db.base import Base
+from app.db.base import Base, value_enum
 
 
 class CallStatus(str, enum.Enum):
@@ -33,8 +33,8 @@ class CallSession(Base):
     id = Column(Integer, primary_key=True, index=True)
     call_sid = Column(String(34), unique=True, nullable=False, index=True)
     phone_number = Column(String(20), nullable=False, index=True)
-    direction = Column(Enum(CallDirection), nullable=False)
-    status = Column(Enum(CallStatus), nullable=False, default=CallStatus.INITIATED)
+    direction = Column(value_enum(CallDirection), nullable=False)
+    status = Column(value_enum(CallStatus), nullable=False, default=CallStatus.INITIATED)
 
     language = Column(String(5), default="fr")
     duration_seconds = Column(Integer, default=0)

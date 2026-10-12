@@ -1,11 +1,11 @@
 """Outcome model for call results: resolved/escalated/no_answer."""
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, Enum, JSON, Index
+from sqlalchemy import Column, String, Integer, DateTime, Text, ForeignKey, JSON, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
 
-from app.db.base import Base
+from app.db.base import Base, value_enum
 
 
 class OutcomeType(str, enum.Enum):
@@ -37,7 +37,7 @@ class Outcome(Base):
     call_session_id = Column(Integer, ForeignKey("call_sessions.id"), unique=True, nullable=False, index=True)
     
     # Outcome classification
-    outcome_type = Column(Enum(OutcomeType), nullable=False, index=True)
+    outcome_type = Column(value_enum(OutcomeType), nullable=False, index=True)
     outcome_details = Column(Text, nullable=True)
     
     # Resolution tracking
@@ -45,7 +45,7 @@ class Outcome(Base):
     customer_satisfied = Column(String(20), nullable=True)  # 'yes', 'no', 'unknown'
     
     # Transfer/escalation details
-    transfer_reason = Column(Enum(TransferReason), nullable=True)
+    transfer_reason = Column(value_enum(TransferReason), nullable=True)
     transfer_to = Column(String(100), nullable=True)  # operator_id, queue_name
     escalation_notes = Column(Text, nullable=True)
     
