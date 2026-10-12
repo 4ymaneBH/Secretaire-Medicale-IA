@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.core.logging_config import get_logger
 from app.services.integrations.tts.streaming import StreamingTTS, StreamingTTSError
@@ -47,6 +47,14 @@ _SOFT_SPLIT_THRESHOLD = 120
 # ~80 chars (~half a sentence) for audio to start. Shorter chunks let
 # ElevenLabs start synthesising sooner, cutting perceived response latency.
 _FORCE_FLUSH_THRESHOLD = 80
+
+
+async def _noop_audio_sent() -> None:
+    pass
+
+
+async def _noop_tts_error(error_type: str) -> None:
+    pass
 
 
 def _detect_sentence_boundary(buffer: str) -> tuple[str, str]:
@@ -136,6 +144,10 @@ class TTSBridge:
         # Reference to the currently running synthesis task so it can be
         # cancelled on barge-in.
         self._active_tts_task: asyncio.Task[Any] | None = None
+
+        # Optional observability callbacks. Their failures must not stop TTS.
+        self.on_audio_sent: Callable[[], Awaitable[None]] = _noop_audio_sent
+        self.on_tts_error: Callable[[str], Awaitable[None]] = _noop_tts_error
 
     # ------------------------------------------------------------------
     # Public API — called by the media stream handler
@@ -357,6 +369,10 @@ class TTSBridge:
                     }
                 )
                 chunk_count += 1
+                try:
+                    await self.on_audio_sent()
+                except Exception as exc:
+                    logger.warning(f"[TTSBridge] on_audio_sent callback failed: {exc}")
 
             logger.debug(
                 f"[TTSBridge] Sent {chunk_count} audio chunks for: "
@@ -365,6 +381,10 @@ class TTSBridge:
 
         except StreamingTTSError as exc:
             logger.error(f"[TTSBridge] TTS error for sentence '{sentence[:60]}...': {exc}")
+            try:
+                await self.on_tts_error(type(exc).__name__)
+            except Exception as callback_exc:
+                logger.warning(f"[TTSBridge] on_tts_error callback failed: {callback_exc}")
 
         except asyncio.CancelledError:
             logger.debug("[TTSBridge] _synthesise_and_send cancelled.")
@@ -372,6 +392,10 @@ class TTSBridge:
 
         except Exception as exc:
             logger.error(f"[TTSBridge] Unexpected error during synthesis: {exc}")
+            try:
+                await self.on_tts_error(type(exc).__name__)
+            except Exception as callback_exc:
+                logger.warning(f"[TTSBridge] on_tts_error callback failed: {callback_exc}")
 
         finally:
             self._active_tts_task = None

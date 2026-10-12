@@ -112,6 +112,9 @@ class RealtimeSession:
         # Called when the VAD detects the caller started speaking (barge-in).
         self.on_speech_started: Callable[[], Awaitable[None]] = _noop_void
 
+        # Called when VAD detects the end of the caller's utterance.
+        self.on_speech_stopped: Callable[[], Awaitable[None]] = _noop_void
+
         # Called with the Whisper transcript of the caller's utterance.
         self.on_transcript: Callable[[str], Awaitable[None]] = _noop_str
 
@@ -379,6 +382,7 @@ class RealtimeSession:
 
         elif event_type == "input_audio_buffer.speech_stopped":
             logger.info(f"{_LOG_PREFIX} Speech stopped")
+            await self._safe_callback(self.on_speech_stopped)
 
         # ------------------------------------------------------------------
         # Transcript (caller utterance recognised by Whisper)

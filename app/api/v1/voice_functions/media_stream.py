@@ -26,7 +26,8 @@ Three concurrent asyncio tasks run for the lifetime of every call:
 
 import asyncio
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket
 from fastapi.websockets import WebSocketDisconnect
@@ -48,7 +49,72 @@ _LOG_PREFIX = "[MediaStream]"
 # Maximum call duration in seconds - kill-switch to prevent runaway billing.
 MAX_CALL_DURATION_SECONDS = 420  # 7 minutes
 
+# Only record structured, non-free-text tool fields. Reasons and recall queries
+# can contain patient health information and are already represented in the
+# access-controlled conversation transcript when the patient says them.
+_EVAL_TOOL_ARGUMENTS = {
+    "get_available_slots": {"days_ahead"},
+    "propose_appointment_slot": {"slot"},
+    "confirm_appointment": set(),
+    "transfer_to_human": {"urgent"},
+    "switch_language": {"language"},
+    "recall_context": set(),
+    "end_call": set(),
+}
+_EVAL_TOOL_RESULTS = {"status", "slots", "appointment_id", "language", "urgent"}
+
 router = APIRouter()
+
+
+def _record_eval_event(session: CallSessionState, event_type: str, **details: object) -> None:
+    session.eval_events.append({
+        "type": event_type,
+        "at": datetime.now(timezone.utc).isoformat(),
+        **details,
+    })
+
+
+def _tool_eval_details(name: str, args_json: str, result: dict) -> dict:
+    """Keep fields needed for grading without duplicating free-text health data."""
+    try:
+        args = json.loads(args_json) if args_json else {}
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    allowed_args = _EVAL_TOOL_ARGUMENTS.get(name, set())
+    return {
+        "name": name,
+        "arguments": {key: args[key] for key in allowed_args if key in args},
+        "result": {key: result[key] for key in _EVAL_TOOL_RESULTS if key in result},
+    }
+
+
+async def _persist_transcript(call_sid: str, speaker: str, text: str, language: str) -> None:
+    """Persist one complete turn; failures must not interrupt a live call."""
+    if not text.strip():
+        return
+    try:
+        from sqlalchemy import select
+        from app.db.session import get_session_context
+        from app.models.call_session import CallSession
+        from app.models.transcript import Transcript
+
+        async with get_session_context() as db:
+            result = await db.execute(select(CallSession.id).where(CallSession.call_sid == call_sid))
+            call_session_id = result.scalar_one_or_none()
+            if call_session_id is None:
+                return
+            db.add(Transcript(
+                call_session_id=call_session_id,
+                speaker=speaker,
+                text=text.strip(),
+                language=language,
+                timestamp=datetime.now(timezone.utc),
+            ))
+            await db.commit()
+    except Exception as exc:
+        logger.error(f"{_LOG_PREFIX} Failed to persist {speaker} transcript: {exc}", exc_info=True)
 
 
 def _twilio_client():
@@ -122,10 +188,20 @@ async def _persist_call_outcome(session: CallSessionState) -> None:
                 logger.warning(f"{_LOG_PREFIX} No CallSession found for {session.call_sid!r}")
                 return
 
-            outcome_type = (
-                OutcomeType.TRANSFERRED if session.transfer_requested
-                else OutcomeType.RESOLVED
-            )
+            if session.transfer_requested:
+                # A successful Twilio redirect is observable here; whether a
+                # human answered the forwarded leg is not.
+                outcome_type = (
+                    OutcomeType.TRANSFERRED if session.transfer_redirect_accepted
+                    else OutcomeType.ESCALATED
+                )
+            elif session.phase == "hangup":
+                outcome_type = (
+                    OutcomeType.RESOLVED if session.hangup_accepted
+                    else OutcomeType.FAILED
+                )
+            else:
+                outcome_type = OutcomeType.ABANDONED
             outcome = Outcome(
                 call_session_id=call_session.id,
                 outcome_type=outcome_type,
@@ -134,6 +210,15 @@ async def _persist_call_outcome(session: CallSessionState) -> None:
                 transfer_reason=TransferReason.URGENT_KEYWORD if session.urgency_detected else (
                     TransferReason.EXPLICIT_REQUEST if session.transfer_requested else None
                 ),
+                meta_data={
+                    "eval_trace_version": 1,
+                    "events": session.eval_events,
+                    "appointment_confirmed": session.appointment_confirmed,
+                    "appointment_id": session.appointment_id,
+                    "transfer_requested": session.transfer_requested,
+                    "transfer_redirect_accepted": session.transfer_redirect_accepted,
+                    "hangup_accepted": session.hangup_accepted,
+                },
             )
             db.add(outcome)
             await db.commit()
@@ -220,6 +305,10 @@ async def media_stream_handler(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
+    stream_start_monotonic = time.perf_counter()
+    last_speech_stop_monotonic: float | None = None
+    first_stream_audio_sent = False
+
     patient_id = await _get_patient_id_for_call(call_sid)
     session = CallSessionState(call_sid=call_sid, language=language, patient_id=patient_id)
 
@@ -240,23 +329,65 @@ async def media_stream_handler(websocket: WebSocket) -> None:
     bridge = TTSBridge(tts=tts, language=language, stream_sid=stream_sid)
     asyncio.create_task(tts.warmup())
 
+    async def on_audio_sent() -> None:
+        nonlocal first_stream_audio_sent, last_speech_stop_monotonic
+        now = time.perf_counter()
+        if not first_stream_audio_sent:
+            first_stream_audio_sent = True
+            _record_eval_event(
+                session, "first_stream_audio_sent",
+                latency_ms=round((now - stream_start_monotonic) * 1000),
+            )
+        if last_speech_stop_monotonic is not None:
+            _record_eval_event(
+                session, "response_audio_sent",
+                latency_ms=round((now - last_speech_stop_monotonic) * 1000),
+            )
+            last_speech_stop_monotonic = None
+
+    async def on_tts_error(error_type: str) -> None:
+        _record_eval_event(session, "tts_error", error_type=error_type)
+
+    bridge.on_audio_sent = on_audio_sent
+    bridge.on_tts_error = on_tts_error
+
     realtime.on_text_delta = bridge.on_text_delta
-    realtime.on_text_done = bridge.on_text_done
+
+    async def on_text_done(full_text: str) -> None:
+        await bridge.on_text_done(full_text)
+        await _persist_transcript(call_sid, "assistant", full_text, session.language)
+
+    realtime.on_text_done = on_text_done
 
     async def on_speech_started() -> None:
         """Barge-in: user started speaking - interrupt in-flight TTS output."""
         logger.info(f"{_LOG_PREFIX} Barge-in detected for {call_sid!r}")
+        _record_eval_event(session, "speech_started")
         bridge.reset_for_new_turn()
         await bridge.interrupt(websocket)
 
     realtime.on_speech_started = on_speech_started
 
+    async def on_speech_stopped() -> None:
+        nonlocal last_speech_stop_monotonic
+        last_speech_stop_monotonic = time.perf_counter()
+        _record_eval_event(session, "speech_stopped")
+
+    realtime.on_speech_stopped = on_speech_stopped
+
     async def on_tool_call(tool_call_id: str, name: str, args_json: str) -> None:
         logger.info(f"{_LOG_PREFIX} Tool call received: name={name!r}")
 
+        started_at = time.perf_counter()
         result_json = await execute_tool(tool_call_id, name, args_json, session)
         result = json.loads(result_json)
         status = result.get("status")
+        _record_eval_event(
+            session,
+            "tool_call",
+            **_tool_eval_details(name, args_json, result),
+            duration_ms=round((time.perf_counter() - started_at) * 1000),
+        )
 
         # end_call and transfer_to_human both end the audio bridge — the model
         # should not keep talking after either, so we suppress response.create.
@@ -277,7 +408,8 @@ async def media_stream_handler(websocket: WebSocket) -> None:
             logger.info(f"{_LOG_PREFIX} Hangup sentinel received - waiting for TTS to finish")
             await bridge.wait_until_drained(timeout=15.0)
             await asyncio.sleep(1.0)
-            await _force_hangup_twilio(call_sid)
+            session.hangup_accepted = await _force_hangup_twilio(call_sid)
+            _record_eval_event(session, "hangup", accepted=session.hangup_accepted)
             try:
                 await websocket.close()
             except Exception:
@@ -287,7 +419,10 @@ async def media_stream_handler(websocket: WebSocket) -> None:
             logger.info(f"{_LOG_PREFIX} Transfer sentinel received - waiting for TTS to finish")
             await bridge.wait_until_drained(timeout=15.0)
             await asyncio.sleep(1.0)
-            await _transfer_call_to_human(call_sid)
+            session.transfer_redirect_accepted = await _transfer_call_to_human(call_sid)
+            _record_eval_event(
+                session, "transfer_redirect", accepted=session.transfer_redirect_accepted
+            )
             try:
                 await websocket.close()
             except Exception:
@@ -311,32 +446,11 @@ async def media_stream_handler(websocket: WebSocket) -> None:
             clarify = {
                 "fr": "[SYSTEM: L'audio était inaudible. Demande poliment de répéter.]",
                 "en": "[SYSTEM: Audio was unclear. Politely ask the patient to repeat.]",
-            }.get(language, "[SYSTEM: Audio was unclear. Politely ask the patient to repeat.]")
+            }.get(session.language, "[SYSTEM: Audio was unclear. Politely ask the patient to repeat.]")
             await realtime.inject_user_turn(clarify)
             return
 
-        try:
-            from app.db.session import get_session_context
-            from sqlalchemy import select
-            from app.models.call_session import CallSession
-            from app.models.transcript import Transcript
-
-            async with get_session_context() as db:
-                result = await db.execute(
-                    select(CallSession).where(CallSession.call_sid == call_sid)
-                )
-                call_session = result.scalar_one_or_none()
-                if call_session:
-                    db.add(Transcript(
-                        call_session_id=call_session.id,
-                        speaker="user",
-                        text=cleaned,
-                        language=language,
-                        timestamp=datetime.utcnow(),
-                    ))
-                    await db.commit()
-        except Exception as exc:
-            logger.error(f"{_LOG_PREFIX} Failed to persist transcript: {exc}", exc_info=True)
+        await _persist_transcript(call_sid, "user", cleaned, session.language)
 
     realtime.on_transcript = on_transcript
 

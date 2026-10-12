@@ -8,7 +8,7 @@ OpenAI as the tool output.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -36,8 +36,11 @@ class CallSessionState:
     transfer_requested: bool = False
     transfer_reason: Optional[str] = None
     urgency_detected: bool = False
+    transfer_redirect_accepted: Optional[bool] = None
+    hangup_accepted: Optional[bool] = None
     summary: Optional[str] = None
     phase: str = "in_progress"
+    eval_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def execute_tool(
